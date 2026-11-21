@@ -1,14 +1,27 @@
 """LUT Manager: browse .cube LUTs and preview them live in the 3D viewport.
 
-The LUT is applied through a compositor node group, so it shows in the viewport when
-the viewport compositor is on (Viewport Shading > Compositor) and in final renders.
-Works with any render engine whose viewport output Blender can composite
-(EEVEE, Cycles, Workbench, Octane...). Supports Blender 4.5 (incl. OctaneBlender) and 5.x.
+Supports Blender 4.5 (incl. OctaneBlender) and 5.x. The LUT is applied in one of two ways:
 
-Blender has no 3D-LUT compositor node, so each .cube table is stored as a 2D strip
-image (N*N x N, one N x N slice per blue level). Every pixel samples the 8 surrounding
-LUT entries with nearest-pixel Map UV lookups and blends them by the fractional parts:
-an exact trilinear lookup that runs on the GPU viewport compositor.
+- EEVEE, Cycles, Workbench: through a compositor node group, so it shows in the
+  viewport when the viewport compositor is on (Viewport Shading > Compositor) and in
+  final renders. Blender has no 3D-LUT compositor node, so each .cube table is stored
+  as a 2D strip image (N*N x N, one N x N slice per blue level). Every pixel samples the
+  8 surrounding LUT entries with nearest-pixel Map UV lookups and blends them by the
+  fractional parts: an exact trilinear lookup that runs on the GPU viewport compositor.
+- Octane: Octane draws its viewport itself, bypassing the compositor, so the file goes
+  into the Custom LUT slot of Octane's camera imagers and the node group is muted.
+
+Sections of this file, in order:
+  .cube files    read_cube() parses a file into a CubeLUT (numpy table + domain).
+  Compositor     builds the node group and splices it before the compositor output.
+  Octane         copies the LUT into Octane's imagers; msgbus re-syncs on engine/camera change.
+  Library        scans the LUT folder, makes thumbnails in a timer, stores favorites.
+  Properties     per-scene settings; their update callbacks call apply_lut()/sync_values().
+  Operators, Panel, Registration.
+
+Data flow: picking a LUT sets settings.lut -> _lut_set -> apply_lut(): read_cube ->
+update_lut_image -> build_group -> insert_node -> sync_values (+ sync_octane).
+Sliders and colour-space menus only call sync_values().
 """
 
 bl_info = {
@@ -24,6 +37,7 @@ bl_info = {
 import colorsys
 import json
 import os
+import re
 
 import bpy
 import bpy.utils.previews
@@ -86,39 +100,73 @@ class CubeLUT:
         return c0 * (1 - fb) + c1 * fb
 
 
-def read_cube(path):
-    size_3d = size_1d = None
-    domain_min, domain_max = [0.0] * 3, [1.0] * 3
-    title = ""
-    values = []
+# The first line that starts like a number: where the data block of a .cube begins.
+_DATA_LINE = re.compile(r"^[ \t]*[\d+\-.]", re.MULTILINE)
 
+
+def _parse_lines(text):
+    """Classify every line of `text` as a keyword or a row of numbers.
+
+    Returns (header dict, list of number lines). Lines are split on "\n" only, like
+    iterating the file; splitlines() would also split on form feeds and other rare
+    separators.
+    """
+    header = {"size_3d": None, "size_1d": None, "domain_min": [0.0] * 3,
+              "domain_max": [1.0] * 3, "title": ""}
+    values = []
+    for line in text.split("\n"):
+        s = line.split("#", 1)[0].strip() if not line.lstrip().startswith("TITLE") else line.strip()
+        if not s:
+            continue
+        if s[0].isdigit() or s[0] in "-+.":
+            values.append(s)
+            continue
+        parts = s.split()
+        key = parts[0].upper()
+        if key == "TITLE":
+            header["title"] = s[5:].strip().strip('"')
+        elif key == "LUT_3D_SIZE":
+            header["size_3d"] = int(parts[1])
+        elif key == "LUT_1D_SIZE":
+            header["size_1d"] = int(parts[1])
+        elif key == "DOMAIN_MIN":
+            header["domain_min"] = [float(v) for v in parts[1:4]]
+        elif key == "DOMAIN_MAX":
+            header["domain_max"] = [float(v) for v in parts[1:4]]
+        elif key in {"LUT_3D_INPUT_RANGE", "LUT_1D_INPUT_RANGE"}:
+            header["domain_min"] = [float(parts[1])] * 3
+            header["domain_max"] = [float(parts[2])] * 3
+    return header, values
+
+
+def read_cube(path):
+    """Parse a .cube file (3D or 1D) into a CubeLUT. Raises ValueError if it is incomplete."""
     # utf-8-sig strips the byte-order mark some tools (Resolve, Photoshop) write.
     with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
-        for line in f:
-            s = line.split("#", 1)[0].strip() if not line.lstrip().startswith("TITLE") else line.strip()
-            if not s:
-                continue
-            if s[0].isdigit() or s[0] in "-+.":
-                values.append(s)
-                continue
-            parts = s.split()
-            key = parts[0].upper()
-            if key == "TITLE":
-                title = s[5:].strip().strip('"')
-            elif key == "LUT_3D_SIZE":
-                size_3d = int(parts[1])
-            elif key == "LUT_1D_SIZE":
-                size_1d = int(parts[1])
-            elif key == "DOMAIN_MIN":
-                domain_min = [float(v) for v in parts[1:4]]
-            elif key == "DOMAIN_MAX":
-                domain_max = [float(v) for v in parts[1:4]]
-            elif key in {"LUT_3D_INPUT_RANGE", "LUT_1D_INPUT_RANGE"}:
-                domain_min = [float(parts[1])] * 3
-                domain_max = [float(parts[2])] * 3
+        text = f.read()
 
-    data = np.array(" ".join(values).split(), dtype=np.float32)
+    # Fast path: keywords sit in a header and the rest is plain numbers, so only the
+    # header is classified line by line and the data block goes to numpy in one call.
+    # A data block with a comment, a keyword or any other non-number line falls back
+    # to classifying every line (the same result, as slow as before). Such a line
+    # either contains "#", starts an inf/nan token (which numpy would accept but the
+    # line rules skip, hence the letter check), or makes the conversion fail.
+    first = _DATA_LINE.search(text)
+    body = text[first.start():] if first else ""
+    if "#" in body or any(c in body for c in "iInN"):
+        body = ""
+    header, values = _parse_lines(text[: len(text) - len(body)])
+    try:
+        data = np.array(" ".join(values + [body]).split(), dtype=np.float32)
+    except ValueError:
+        if not body:
+            raise
+        header, values = _parse_lines(text)
+        data = np.array(" ".join(values).split(), dtype=np.float32)
     data = data[: len(data) - len(data) % 3].reshape(-1, 3)
+
+    size_3d, size_1d = header["size_3d"], header["size_1d"]
+    domain_min, domain_max, title = header["domain_min"], header["domain_max"], header["title"]
 
     if size_3d:
         if size_3d < 2 or len(data) < size_3d ** 3:
@@ -150,11 +198,13 @@ def _expand_1d(curve, n=33):
 
 
 def color_spaces():
+    """Colour-space names of the current OCIO config, as the Convert Colorspace node lists them."""
     prop = bpy.types.CompositorNodeConvertColorSpace.bl_rna.properties["from_color_space"]
     return [item.identifier for item in prop.enum_items]
 
 
 def scene_linear_space():
+    """Name of the compositor's working space: "scene_linear" in 5.x, "Linear Rec.709" in 4.5."""
     spaces = color_spaces()
     for name in ("scene_linear", "Linear Rec.709"):
         if name in spaces:
@@ -163,6 +213,10 @@ def scene_linear_space():
 
 
 def update_lut_image(scene, lut):
+    """Write the LUT into the scene's hidden ".LUTM <scene>" strip image (Non-Color, float).
+
+    The image is generated, not saved, so _on_load rebuilds it after opening a file.
+    """
     name = f".LUTM {scene.name}"
     width, height = lut.size * lut.size, lut.size
     img = bpy.data.images.get(name)
@@ -178,10 +232,12 @@ def update_lut_image(scene, lut):
 
 
 def _socket(sockets, identifier):
+    """Find a socket by identifier; sockets["name"] looks up by display name, which repeats on Mix nodes."""
     return next(s for s in sockets if s.identifier == identifier)
 
 
 def _math(nodes, op, a, b=None, c=None, clamp=False, x=0, y=0):
+    """Add a Math node; each of a, b, c is a socket to link or a constant. Returns its output."""
     node = nodes.new("ShaderNodeMath")
     node.operation = op
     node.use_clamp = clamp
@@ -208,6 +264,7 @@ def _mix(nodes, links, factor, a, b, x=0, y=0):
 
 
 def _map_uv_nearest(node):
+    """Make Map UV sample the nearest pixel (bilinear/anisotropic would blur across LUT cells)."""
     if "Interpolation" in node.inputs:  # Blender 5.x
         node.inputs["Interpolation"].default_value = "Nearest"
     else:
@@ -215,6 +272,7 @@ def _map_uv_nearest(node):
 
 
 def _ensure_interface(group):
+    """Give the node group its sockets once: Image, Factor, Exposure in; Image out."""
     if group.interface.items_tree:
         return
     iface = group.interface
@@ -325,6 +383,7 @@ def build_group(group, lut, image):
 
 
 def ensure_group(settings):
+    """The scene's "LUT Manager" node group, created on first use and kept in settings.node_group."""
     group = settings.node_group
     if group is None:
         group = bpy.data.node_groups.new(NODE_NAME, "CompositorNodeTree")
@@ -333,6 +392,10 @@ def ensure_group(settings):
 
 
 def _scene_tree(scene, create=True):
+    """The scene's compositor tree: scene.node_tree (4.5) or scene.compositing_node_group (5.x).
+
+    With create=True it is switched on (4.5) or created with Render Layers -> Output (5.x).
+    """
     if not IS_BLENDER_5:
         if create and not scene.use_nodes:
             scene.use_nodes = True
@@ -366,6 +429,7 @@ def _output_socket(tree):
 
 
 def _image_source(tree):
+    """Render Layers' Image output, used when nothing feeds the compositor output yet."""
     rl = next((n for n in tree.nodes if n.bl_idname == "CompositorNodeRLayers"), None)
     if rl is None:
         rl = tree.nodes.new("CompositorNodeRLayers")
@@ -374,6 +438,7 @@ def _image_source(tree):
 
 
 def find_node(scene):
+    """The add-on's group node in the scene compositor (named NODE_NAME), or None."""
     tree = _scene_tree(scene, create=False)
     if tree is None:
         return None
@@ -404,6 +469,7 @@ def insert_node(scene, group):
 
 
 def remove_node(scene):
+    """Delete the group node and reconnect whatever fed it to whatever it fed."""
     node = find_node(scene)
     if node is None:
         return
@@ -418,6 +484,10 @@ def remove_node(scene):
 
 
 def sync_values(scene, settings):
+    """Push the cheap settings (on/off, factor, exposure, colour spaces) to the nodes and Octane.
+
+    Called on every slider change; it never rebuilds the node group.
+    """
     sync_octane(scene, settings)
     node = find_node(scene)
     if node is not None:
@@ -447,6 +517,7 @@ def sync_values(scene, settings):
 
 
 def is_octane(scene):
+    """True when Octane renders this scene and its add-on is loaded (oct_view_cam exists)."""
     return scene.render.engine == "octane" and hasattr(scene, "oct_view_cam")
 
 
@@ -460,6 +531,10 @@ def _octane_imagers(scene):
 
 
 def sync_octane(scene, settings):
+    """Set or clear Custom LUT / LUT Strength on Octane's imagers and switch the imagers on.
+
+    Only writes values that changed, so repeated syncs don't touch Octane's settings.
+    """
     if not is_octane(scene):
         return
     active = settings.enabled and bool(settings.lut_path)
@@ -481,12 +556,14 @@ _msgbus_owner = object()
 
 
 def _on_engine_or_camera_change():
+    """msgbus callback: switching engine or camera changes which path (compositor/Octane) applies."""
     for scene in bpy.data.scenes:
         if scene.lut_manager.lut_path:
             sync_values(scene, scene.lut_manager)
 
 
 def _subscribe_msgbus():
+    """(Re)subscribe to render-engine and scene-camera changes. Loading a file drops subscriptions."""
     bpy.msgbus.clear_by_owner(_msgbus_owner)
     for key in ((bpy.types.RenderSettings, "engine"), (bpy.types.Scene, "camera")):
         bpy.msgbus.subscribe_rna(key=key, owner=_msgbus_owner, args=(), notify=_on_engine_or_camera_change)
@@ -497,6 +574,8 @@ def _subscribe_msgbus():
 
 
 class Entry:
+    """One .cube file in the LUT folder. `index` is its stable enum number for this scan."""
+
     __slots__ = ("index", "path", "name", "category", "mtime")
 
     def __init__(self, index, path, name, category, mtime):
@@ -507,24 +586,28 @@ class Entry:
         self.mtime = mtime
 
 
-_entries = []
-_by_path = {}
+# Module state for the current scan (not saved; rebuilt when the folder changes).
+_entries = []      # Entry list, sorted by name
+_by_path = {}      # norm(path) -> Entry
 _scanned_dir = None
-_previews = None
-_pending = []
-_sample = None
+_previews = None   # bpy.utils.previews collection, keyed by path
+_pending = []      # entries still waiting for a thumbnail
+_sample = None     # cached thumbnail test chart
 
 
 def prefs():
+    """This add-on's preferences (LUT folder, favorites)."""
     return bpy.context.preferences.addons[__name__].preferences
 
 
 def norm(path):
+    """Absolute, normalised path used as the key everywhere ("" for an empty path)."""
     # normcase lower-cases on Windows only, so paths compare correctly on both platforms.
     return os.path.normcase(os.path.abspath(bpy.path.abspath(path))) if path else ""
 
 
 def entries():
+    """All LUTs in the folder, rescanning only when the folder setting has changed."""
     folder = prefs().lut_dir
     if norm(folder) != _scanned_dir:
         scan(folder)
@@ -532,6 +615,7 @@ def entries():
 
 
 def scan(folder):
+    """Find every .cube under `folder` and queue thumbnails; the first subfolder is the category."""
     global _scanned_dir
     _entries.clear()
     _by_path.clear()
@@ -561,6 +645,7 @@ def scan(folder):
 
 
 def entry_for(path):
+    """The Entry for a file path, or None if it isn't in the LUT folder."""
     entries()
     return _by_path.get(norm(path))
 
@@ -570,6 +655,7 @@ def categories():
 
 
 def filtered(settings):
+    """Entries matching the panel's favorites/category/search filters, in the chosen sort order."""
     favs = favorites()
     search = settings.search.strip().lower()
     result = []
@@ -590,6 +676,7 @@ def filtered(settings):
 
 
 def favorites():
+    """Set of favorite paths, stored as JSON in the preferences (empty if the JSON is damaged)."""
     try:
         return set(json.loads(prefs().favorites or "[]"))
     except ValueError:
@@ -597,6 +684,7 @@ def favorites():
 
 
 def toggle_favorite(path):
+    """Add or remove a favorite and save preferences, if Blender auto-saves them."""
     favs = favorites()
     favs.symmetric_difference_update({norm(path)})
     prefs().favorites = json.dumps(sorted(favs))
@@ -624,12 +712,14 @@ def _sample_image():
 
 
 def icon_id(entry):
+    """Thumbnail icon id, or 0 while the thumbnail isn't made yet."""
     if _previews is not None and entry.path in _previews:
         return _previews[entry.path].icon_id
     return 0
 
 
 def _make_thumbnail(entry):
+    """Render the test chart through the LUT (numpy) into a preview; red if the file is broken."""
     if _previews is None or entry.path in _previews:
         return
     preview = _previews.new(entry.path)
@@ -646,6 +736,7 @@ def _make_thumbnail(entry):
 
 
 def _thumbnail_tick():
+    """Timer: make 4 thumbnails per tick so the UI stays responsive, then redraw 3D views."""
     for _ in range(4):
         if not _pending:
             break
@@ -658,6 +749,7 @@ def _thumbnail_tick():
 
 
 def clear_previews():
+    """Drop all thumbnails and the pending queue (before a rescan)."""
     _pending.clear()
     if _previews is not None:
         _previews.clear()
@@ -668,6 +760,10 @@ def clear_previews():
 
 
 def apply_lut(scene):
+    """Load settings.lut_path and (re)build everything: strip image, node group, compositor link.
+
+    A file that can't be read leaves the previous grade in place and sets settings.error.
+    """
     settings = scene.lut_manager
     settings.error = ""
     if not settings.lut_path:
@@ -686,10 +782,12 @@ def apply_lut(scene):
 
 
 def _on_values(self, context):
+    """Update callback for factor, exposure and colour spaces."""
     sync_values(self.id_data, self)
 
 
 def _on_enabled(self, context):
+    """Update callback for the header checkbox; rebuilds if the node was deleted meanwhile."""
     if self.enabled and self.lut_path and find_node(self.id_data) is None:
         apply_lut(self.id_data)
     else:
@@ -703,6 +801,10 @@ _space_items = []
 
 
 def _lut_enum_items(self, context):
+    """Items for the thumbnail browser: the filtered LUTs, plus the current one if filtered out.
+
+    Item numbers are Entry.index, so the value survives filtering and sorting.
+    """
     items = filtered(self)
     current = entry_for(self.lut_path)
     if current is not None and current not in items:
@@ -712,15 +814,21 @@ def _lut_enum_items(self, context):
         _lut_items.append((e.path, e.name, f"{e.category}\n{e.path}", icon_id(e) or "IMAGE_DATA", e.index))
     if not _lut_items:
         _lut_items.append(("NONE", "No LUTs", "Set a LUT folder in the panel", "ERROR", -1))
+    elif current is None:
+        # _lut_get returns -1 with nothing selected; without a matching item Blender
+        # warns on every redraw.
+        _lut_items.insert(0, ("NONE", "No LUT selected", "Pick a LUT", "BLANK1", -1))
     return _lut_items
 
 
 def _lut_get(self):
+    """The enum is a view of lut_path: return its Entry.index, or -1 (no selection)."""
     entry = entry_for(self.lut_path)
     return entry.index if entry else -1
 
 
 def _lut_set(self, value):
+    """Picking a thumbnail stores the path and applies the LUT."""
     entry = next((e for e in entries() if e.index == value), None)
     if entry is None:
         return
@@ -737,10 +845,13 @@ def _category_enum_items(self, context):
 
 
 def _space_default(*preferred):
+    """First of `preferred` that exists in this OCIO config, else the first colour space."""
     ids = [s[0] for s in _space_items]
     return next((name for name in preferred if name in ids), ids[0])
 
 
+# Add-on preferences: shared by all files. (No docstrings on Blender classes below:
+# Blender shows them as tooltips.)
 class LUTM_Preferences(bpy.types.AddonPreferences):
     bl_idname = __name__
 
@@ -757,6 +868,7 @@ def _make_settings():
     if not _space_items:
         _space_items.extend((s, s, "") for s in color_spaces())
 
+    # Per-scene settings, stored in the .blend as scene.lut_manager.
     class LUTM_Settings(bpy.types.PropertyGroup):
         enabled: BoolProperty(name="Enable LUT", default=True, update=_on_enabled)
         lut_path: StringProperty(name="LUT File", subtype="FILE_PATH")
@@ -788,6 +900,7 @@ def _make_settings():
 # Operators
 
 
+# Previous/next LUT within the current filter, wrapping around.
 class LUTM_OT_step(bpy.types.Operator):
     bl_idname = "lut_manager.step"
     bl_label = "Next / Previous LUT"
@@ -846,6 +959,7 @@ class LUTM_OT_remove(bpy.types.Operator):
 # Panel
 
 
+# The sidebar panel (3D Viewport > N > LUT).
 class LUTM_PT_panel(bpy.types.Panel):
     bl_label = "LUT Manager"
     bl_space_type = "VIEW_3D"
@@ -937,6 +1051,7 @@ _settings_cls = None
 
 
 def register():
+    """Called by Blender when the add-on is enabled."""
     global _previews, _settings_cls
     _previews = bpy.utils.previews.new()
     _settings_cls = _make_settings()
@@ -949,6 +1064,7 @@ def register():
 
 
 def unregister():
+    """Called by Blender when the add-on is disabled; undoes everything register() did."""
     global _previews, _scanned_dir
     bpy.msgbus.clear_by_owner(_msgbus_owner)
     if _on_load in bpy.app.handlers.load_post:
