@@ -40,8 +40,11 @@ jobs:
             --python tests/test_addon.py -- --dump "$RUNNER_TEMP/results.json" | tee "$RUNNER_TEMP/test.log"
           exit "${PIPESTATUS[0]}"
 
-      - name: Keep the log (3 days)
-        if: always()
+      # Only on failure (the log is in the run output anyway), and never fail the run
+      # because of it: artifact storage is shared by the whole account and can be full.
+      - name: Keep the log of a failed run (3 days)
+        if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: test-log-blender-${{ matrix.blender }}

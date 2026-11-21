@@ -146,7 +146,7 @@ Nearly every LUT outputs normal sRGB video. The right setting depends on **Rende
 | Problem | Fix |
 |---|---|
 | No **LUT** tab in the N panel | Make sure the add-on is ticked in Preferences → Add-ons, then restart Blender. |
-| Two "LUT Manager" entries, or an error about a duplicate add-on | An old single-file `lut_manager.py` is still installed. Delete it (see [Installation](#installation)) and restart Blender. |
+| Add-ons list shows version 1.1 after installing 1.2, or the console says "multiple addons with the same name" | An old single-file `lut_manager.py` is still installed next to the new `lut_manager` folder. Delete the `.py` file (see [Installation](#installation)) and restart Blender. |
 | The LUT doesn't show in the viewport (EEVEE/Cycles) | Set **Compositor** to **Always**, and use **Material Preview** or **Rendered** shading. |
 | The LUT doesn't show in Octane | Use Octane **Rendered** mode with the Octane server running, and make sure the header checkbox is on. |
 | Colours look wrong in Octane | Untick **ACES tone mapping** in the imager's Tone Mapping section (see [Octane settings](#octane-settings)). |
