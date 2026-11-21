@@ -1,23 +1,37 @@
 # LUT Manager
 
+<!-- Static badges (the repo is private): update the version numbers by hand on each release. -->
+![Blender](https://img.shields.io/badge/Blender-5.3-E87D0D?logo=blender&logoColor=white)
+![Release](https://img.shields.io/badge/release-v1.2.0-blue)
+[![Tests](https://github.com/mttfntn/lut-manager-blender/actions/workflows/tests.yml/badge.svg)](https://github.com/mttfntn/lut-manager-blender/actions/workflows/tests.yml)
+![License](https://img.shields.io/badge/license-GPL--3.0--or--later-green)
+![Python](https://img.shields.io/badge/language-Python-3776AB?logo=python&logoColor=white)
+
 A Blender add-on to browse your `.cube` LUTs and preview them live in the 3D viewport.
 
-- Works in **Blender 4.5 and 5.x**, including **OctaneBlender** (built on Blender 4.5).
-- Works on **Windows and macOS**.
-- Everything is in one file: `lut_manager.py`.
+- Requires **Blender 5.3**. Works with Blender's own engines and with the **OctaneBlender add-on** for Blender 5.3.
+- Plain Python with no platform-specific code. It is tested on Windows (by hand) and Linux (automatically); it should also work on macOS, but that hasn't been tested.
+- Licensed under **GPL-3.0-or-later** (see [LICENSE](LICENSE)).
+
+Working on the add-on? Read [HANDOVER.md](HANDOVER.md). AI assistants: [AGENTS.md](AGENTS.md).
 
 ---
 
 ## Installation
 
-1. In Blender, open **Edit → Preferences → Add-ons**.
-2. Click the **⌄** menu (top right) → **Install from Disk…** and pick `lut_manager.py`.
-3. Tick **LUT Manager** in the list to enable it.
-4. In the 3D viewport, press **N** and open the **LUT** tab.
-5. Choose the folder that contains your `.cube` files.
+1. Download `lut_manager-<version>.zip` from the [latest release](https://github.com/mttfntn/lut-manager-blender/releases/latest). Don't unzip it.
+2. In Blender, open **Edit → Preferences → Add-ons**.
+3. Click the **⌄** menu (top right) → **Install from Disk…** and pick the zip.
+4. Tick **LUT Manager** in the list to enable it.
+5. In the 3D viewport, press **N** and open the **LUT** tab.
+6. Choose the folder that contains your `.cube` files.
 
-> When you update `lut_manager.py`, install it again, then restart Blender.
-> Blender runs its installed copy, not the file on your Desktop.
+> **Updating from version 1.1 or older:** the add-on used to be a single file, `lut_manager.py`.
+> Before installing the zip, delete `lut_manager.py` from your add-ons folder
+> (Windows: `%APPDATA%\Blender Foundation\Blender\5.3\scripts\addons`), or Blender will find
+> two add-ons with the same name. Your LUT folder and favorites are kept.
+>
+> After any update, restart Blender: it keeps running the old copy until then.
 
 ---
 
@@ -63,7 +77,7 @@ In tests, the output matched a reference LUT implementation exactly.
 
 ### Octane: Octane's own imager
 
-Octane draws its viewport itself, so Blender's compositor never touches it. When the render engine is **Octane**, the add-on uses Octane's own LUT slot instead:
+Octane draws its viewport itself, so Blender's compositor never touches it. When the render engine is **Octane** (the OctaneBlender add-on for Blender 5.3; tested with version 32.2), the add-on uses Octane's own LUT slot instead:
 
 - The chosen `.cube` file goes into **Custom LUT** of the Octane camera imager. This is set for both the free viewport and the active camera.
 - **LUT Factor** controls Octane's **LUT Strength**.
@@ -132,6 +146,7 @@ Nearly every LUT outputs normal sRGB video. The right setting depends on **Rende
 | Problem | Fix |
 |---|---|
 | No **LUT** tab in the N panel | Make sure the add-on is ticked in Preferences → Add-ons, then restart Blender. |
+| Two "LUT Manager" entries, or an error about a duplicate add-on | An old single-file `lut_manager.py` is still installed. Delete it (see [Installation](#installation)) and restart Blender. |
 | The LUT doesn't show in the viewport (EEVEE/Cycles) | Set **Compositor** to **Always**, and use **Material Preview** or **Rendered** shading. |
 | The LUT doesn't show in Octane | Use Octane **Rendered** mode with the Octane server running, and make sure the header checkbox is on. |
 | Colours look wrong in Octane | Untick **ACES tone mapping** in the imager's Tone Mapping section (see [Octane settings](#octane-settings)). |
@@ -145,5 +160,5 @@ Nearly every LUT outputs normal sRGB video. The right setting depends on **Rende
 
 - **Only `.cube` files** are supported (3D and 1D). `.3dl`, `.csp` and other formats are not.
 - **One LUT per scene.** Different scenes can each have their own LUT.
-- **Blender 4.5 or newer** is required. Older versions use different compositor nodes.
+- **Only Blender 5.3 is supported and tested.** Version 1.1 also ran on Blender 4.5 (the standalone OctaneBlender 30.x); that code was removed in 1.2.
 - **Each computer needs the LUT folder set once,** because the path is different on each one.
