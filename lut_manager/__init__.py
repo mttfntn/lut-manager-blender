@@ -1,6 +1,7 @@
 """LUT Manager: browse .cube LUTs and preview them live in the 3D viewport.
 
-Supports Blender 4.5 (incl. OctaneBlender) and 5.x. The LUT is applied in one of two ways:
+Supports Blender 5.3 (with or without the OctaneBlender add-on). The LUT is applied in
+one of two ways:
 
 - EEVEE, Cycles, Workbench: through a compositor node group, so it shows in the
   viewport when the viewport compositor is on (Viewport Shading > Compositor) and in
@@ -27,8 +28,8 @@ Sliders and colour-space menus only call sync_values().
 bl_info = {
     "name": "LUT Manager",
     "author": "Matteo Fontana",
-    "version": (1, 1, 0),
-    "blender": (4, 5, 0),
+    "version": (1, 2, 0),
+    "blender": (5, 3, 0),
     "location": "3D Viewport > Sidebar > LUT",
     "description": "Browse and preview .cube LUTs live in the 3D viewport",
     "category": "Compositing",
@@ -44,12 +45,10 @@ import bpy.utils.previews
 import numpy as np
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 
-# Blender 5.0 replaced scene.node_tree/Composite node with a compositing node group.
-IS_BLENDER_5 = "compositing_node_group" in bpy.types.Scene.bl_rna.properties
-
 NODE_NAME = "LUT Manager"
 IN_SPACE_NODE = "LUTM Input Space"
 OUT_SPACE_NODE = "LUTM Output Space"
+SCENE_LINEAR = "scene_linear"  # the compositor's working colour space (an OCIO role)
 EXTENSIONS = {".cube"}
 UNCATEGORIZED = "Uncategorized"
 THUMB_SIZE = 128
@@ -203,15 +202,6 @@ def color_spaces():
     return [item.identifier for item in prop.enum_items]
 
 
-def scene_linear_space():
-    """Name of the compositor's working space: "scene_linear" in 5.x, "Linear Rec.709" in 4.5."""
-    spaces = color_spaces()
-    for name in ("scene_linear", "Linear Rec.709"):
-        if name in spaces:
-            return name
-    return spaces[0]
-
-
 def update_lut_image(scene, lut):
     """Write the LUT into the scene's hidden ".LUTM <scene>" strip image (Non-Color, float).
 
@@ -261,14 +251,6 @@ def _mix(nodes, links, factor, a, b, x=0, y=0):
     links.new(a, _socket(node.inputs, "A_Color"))
     links.new(b, _socket(node.inputs, "B_Color"))
     return _socket(node.outputs, "Result_Color")
-
-
-def _map_uv_nearest(node):
-    """Make Map UV sample the nearest pixel (bilinear/anisotropic would blur across LUT cells)."""
-    if "Interpolation" in node.inputs:  # Blender 5.x
-        node.inputs["Interpolation"].default_value = "Nearest"
-    else:
-        node.filter_type = "NEAREST"
 
 
 def _ensure_interface(group):
@@ -347,7 +329,8 @@ def build_group(group, lut, image):
         uv.inputs["Z"].default_value = 1.0
         map_uv = nodes.new("CompositorNodeMapUV")
         map_uv.location = (800, 600 - row * 160)
-        _map_uv_nearest(map_uv)
+        # Nearest pixel: bilinear filtering would blur across neighbouring LUT cells.
+        map_uv.inputs["Interpolation"].default_value = "Nearest"
         links.new(lut_img.outputs["Image"], map_uv.inputs["Image"])
         links.new(uv.outputs["Vector"], map_uv.inputs["UV"])
         return map_uv.outputs["Image"]
@@ -392,14 +375,7 @@ def ensure_group(settings):
 
 
 def _scene_tree(scene, create=True):
-    """The scene's compositor tree: scene.node_tree (4.5) or scene.compositing_node_group (5.x).
-
-    With create=True it is switched on (4.5) or created with Render Layers -> Output (5.x).
-    """
-    if not IS_BLENDER_5:
-        if create and not scene.use_nodes:
-            scene.use_nodes = True
-        return scene.node_tree
+    """The scene's compositor node group; with create=True, made as Render Layers -> Output if missing."""
     tree = scene.compositing_node_group
     if tree is None and create:
         tree = bpy.data.node_groups.new("Compositor", "CompositorNodeTree")
@@ -414,17 +390,13 @@ def _scene_tree(scene, create=True):
 
 
 def _output_socket(tree):
-    """The socket that receives the final image: Composite node (4.x) or group output (5.x)."""
-    if IS_BLENDER_5:
-        if not any(i.in_out == "OUTPUT" for i in tree.interface.items_tree if i.item_type == "SOCKET"):
-            tree.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
-        idname = "NodeGroupOutput"
-    else:
-        idname = "CompositorNodeComposite"
-    outputs = [n for n in tree.nodes if n.bl_idname == idname]
-    node = next((n for n in outputs if getattr(n, "is_active_output", False)), None)
+    """The group output node that receives the final image, and its first input socket."""
+    if not any(i.in_out == "OUTPUT" for i in tree.interface.items_tree if i.item_type == "SOCKET"):
+        tree.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    outputs = [n for n in tree.nodes if n.bl_idname == "NodeGroupOutput"]
+    node = next((n for n in outputs if n.is_active_output), None)
     if node is None:
-        node = outputs[0] if outputs else tree.nodes.new(idname)
+        node = outputs[0] if outputs else tree.nodes.new("NodeGroupOutput")
     return node, node.inputs[0]
 
 
@@ -498,15 +470,14 @@ def sync_values(scene, settings):
     group = settings.node_group
     if group is None:
         return
-    linear = scene_linear_space()
     space_in = group.nodes.get(IN_SPACE_NODE)
     space_out = group.nodes.get(OUT_SPACE_NODE)
     if space_in:
-        space_in.from_color_space = linear
+        space_in.from_color_space = SCENE_LINEAR
         space_in.to_color_space = settings.input_space
     if space_out:
         space_out.from_color_space = settings.output_space
-        space_out.to_color_space = linear
+        space_out.to_color_space = SCENE_LINEAR
 
 
 # ===========================================================================
