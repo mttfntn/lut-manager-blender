@@ -1,0 +1,40 @@
+name: Release
+
+# Push an annotated tag vX.Y.Z (matching bl_info["version"]) to test, build and publish
+# a GitHub release with the add-on zip attached. The tag message becomes the notes.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # checkout can leave a lightweight copy of the tag; fetch the real annotated tag
+      # so its message is available for the release notes.
+      - name: Fetch the tag itself
+        run: git fetch --force origin "refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
+      - name: Build zip (checks the tag matches bl_info)
+        run: echo "ZIP=$(python3 tools/build_release.py --expect-version "$GITHUB_REF_NAME")" >> "$GITHUB_ENV"
+
+      - name: Release notes from the tag message
+        run: |
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          if [ ! -s notes.md ]; then echo "Release $GITHUB_REF_NAME" > notes.md; fi
+          cat notes.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "$ZIP" --title "LUT Manager $GITHUB_REF_NAME" --notes-file notes.md --verify-tag
