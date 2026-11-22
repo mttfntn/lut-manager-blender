@@ -10,7 +10,7 @@ search, favorites and categories) and preview the chosen LUT live in the 3D view
 
 - Author: Matteo Fontana. Original work, not a fork; there is no upstream to merge from.
 - License: GPL-3.0-or-later ([LICENSE](LICENSE)).
-- Repository: <https://github.com/mttfntn/lut-manager-blender> (private), branch `main`.
+- Repository: <https://github.com/mttfntn/lut-manager-blender> (public), branch `main`.
 
 ## What you need
 
@@ -105,8 +105,7 @@ never touched (the favorites test may save preferences).
 ## How to make a release
 
 1. Bump `bl_info["version"]` in `lut_manager/__init__.py`.
-2. Update the static **release** badge in `README.md` by hand (the repo is private, so
-   shields.io can't read it). Update the Blender badge too if the supported version changed.
+2. The release, license and language badges in `README.md` update themselves. Update the Blender badge only if the supported Blender version changed.
 3. Commit and push to `main`; wait for Tests to pass.
 4. Create an **annotated** tag whose message is the release notes, and push it:
    ```bash

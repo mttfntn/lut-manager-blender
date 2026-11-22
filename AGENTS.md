@@ -4,7 +4,7 @@ Compact guide for AI assistants. Human version: HANDOVER.md. User guide: README.
 
 ## Facts
 - Blender 5.3 only (`bl_info["blender"] = (5, 3, 0)`); GPL-3.0-or-later; original work (no upstream).
-- Repo: github.com/mttfntn/lut-manager-blender (private), branch `main`, remote `origin`.
+- Repo: github.com/mttfntn/lut-manager-blender (public), branch `main`, remote `origin`.
 - All add-on code: `lut_manager/__init__.py` (single module). Module name `lut_manager`; prefs keyed by `__name__`.
 - Optional: OctaneBlender add-on 32.x for Blender 5.3 (`scene.oct_view_cam`, `camera.data.octane`).
 
@@ -47,7 +47,7 @@ pick thumbnail → `_lut_set` → `apply_lut`: `read_cube` → `update_lut_image
 - Parser: 0 differences on 1,134 generated files; 33³ parse 14.3 → 8.4 ms.
 
 ## Release checklist
-1. Bump `bl_info["version"]`; update static badges (release, Blender) in README by hand (repo is private).
+1. Bump `bl_info["version"]`. Release, license and language badges are live; update the static Blender badge only if the supported version changed.
 2. Push to `main`; Tests green.
 3. `git tag -a vX.Y.Z -m "title" -m "notes"`; `git push origin vX.Y.Z`.
 4. Release workflow: tests → checks tag == bl_info → builds zip → `gh release create` with tag message as notes. Verify with `gh release view vX.Y.Z`.

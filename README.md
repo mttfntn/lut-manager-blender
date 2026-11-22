@@ -1,11 +1,11 @@
 # LUT Manager
 
-<!-- Static badges (the repo is private): update the version numbers by hand on each release. -->
+<!-- The Blender badge is static (the add-on has no manifest for shields.io to read): update it if the supported version changes. -->
 ![Blender](https://img.shields.io/badge/Blender-5.3-E87D0D?logo=blender&logoColor=white)
-![Release](https://img.shields.io/badge/release-v1.2.0-blue)
+[![Release](https://img.shields.io/github/v/release/mttfntn/lut-manager-blender)](https://github.com/mttfntn/lut-manager-blender/releases/latest)
 [![Tests](https://github.com/mttfntn/lut-manager-blender/actions/workflows/tests.yml/badge.svg)](https://github.com/mttfntn/lut-manager-blender/actions/workflows/tests.yml)
-![License](https://img.shields.io/badge/license-GPL--3.0--or--later-green)
-![Python](https://img.shields.io/badge/language-Python-3776AB?logo=python&logoColor=white)
+[![License](https://img.shields.io/github/license/mttfntn/lut-manager-blender)](LICENSE)
+[![Language](https://img.shields.io/github/languages/top/mttfntn/lut-manager-blender)](https://github.com/mttfntn/lut-manager-blender)
 
 A Blender add-on to browse your `.cube` LUTs and preview them live in the 3D viewport.
 
